@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import LightRays from "./components/LightRays.jsx";
+import { createClient } from "@supabase/supabase-js";
 
 const USERS = [
   {
@@ -37,6 +38,16 @@ const USERS = [
 const STORAGE_KEY_MATCHES = "ppc_scheduled";
 const STORAGE_KEY_SESSION = "ppc_session";
 const STORAGE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
+const SUPABASE_URL =
+  import.meta.env.VITE_SUPABASE_URL ??
+  "https://xrlnbuawygnccfuapvcr.supabase.co";
+const SUPABASE_ANON_KEY =
+  import.meta.env.VITE_SUPABASE_ANON_KEY ??
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhybG5idWF3eWduY2NmdWFwdmNyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxNzQxMDAsImV4cCI6MjA4Nzc1MDEwMH0.MJxYXdX6rLD2FImBWlxRXA5tHiUJz5pIotjwslSQ1Kc";
+const supabase =
+  SUPABASE_URL && SUPABASE_ANON_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    : null;
 
 function getStorage() {
   try {
@@ -89,6 +100,30 @@ function saveData(key, value) {
   } catch {}
   if (!window.__ppcStore) window.__ppcStore = {};
   window.__ppcStore[key] = payload;
+}
+
+async function fetchSupabaseMatches() {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from("matches")
+    .select("id, datetime, location, created_by, match_players(user_id)")
+    .order("datetime", { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  return (data ?? []).map((row) => {
+    const joined = (row.match_players ?? []).map((entry) => entry.user_id);
+    const players = Array.from(new Set([row.created_by, ...joined]));
+    return {
+      id: row.id,
+      datetime: row.datetime,
+      location: row.location,
+      createdBy: row.created_by,
+      players,
+    };
+  });
 }
 
 const APP_CSS = `
@@ -682,12 +717,39 @@ function Dashboard({ user, onLogout }) {
   const [newDate, setNewDate] = useState("");
   const [newTime, setNewTime] = useState("");
   const [newLocation, setNewLocation] = useState("");
+  const [syncError, setSyncError] = useState("");
 
   useEffect(() => {
     saveData(STORAGE_KEY_MATCHES, matches);
   }, [matches]);
 
-  const createMatch = () => {
+  useEffect(() => {
+    let alive = true;
+
+    const sync = async () => {
+      if (!supabase) return;
+      try {
+        const remoteMatches = await fetchSupabaseMatches();
+        if (alive && remoteMatches) {
+          setMatches(remoteMatches);
+          setSyncError("");
+        }
+      } catch (error) {
+        if (alive) {
+          setSyncError("sync unavailable");
+        }
+      }
+    };
+
+    sync();
+    const timer = setInterval(sync, 6000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const createMatch = async () => {
     if (!newDate || !newTime) return;
     const match = {
       id: Date.now().toString(),
@@ -696,20 +758,63 @@ function Dashboard({ user, onLogout }) {
       createdBy: user.id,
       players: [user.id],
     };
-    setMatches((prev) => [match, ...prev]);
+    try {
+      if (supabase) {
+        const { data: created, error: createError } = await supabase
+          .from("matches")
+          .insert({
+            datetime: match.datetime,
+            location: match.location,
+            created_by: user.id,
+          })
+          .select("id, datetime, location, created_by")
+          .single();
+
+        if (createError) throw createError;
+
+        const { error: joinError } = await supabase.from("match_players").upsert(
+          { match_id: created.id, user_id: user.id },
+          { onConflict: "match_id,user_id", ignoreDuplicates: true }
+        );
+
+        if (joinError) throw joinError;
+
+        const remoteMatches = await fetchSupabaseMatches();
+        if (remoteMatches) setMatches(remoteMatches);
+      } else {
+        setMatches((prev) => [match, ...prev]);
+      }
+      setSyncError("");
+    } catch {
+      setSyncError("sync unavailable");
+      setMatches((prev) => [match, ...prev]);
+    }
     setNewDate("");
     setNewTime("");
     setNewLocation("");
     setShowCreate(false);
   };
 
-  const joinMatch = (id) => {
+  const joinMatch = async (id) => {
     setMatches((prev) =>
-      prev.map((match) => {
-        if (match.id !== id || match.players.includes(user.id)) return match;
-        return { ...match, players: [...match.players, user.id] };
-      })
+      prev.map((match) =>
+        match.id !== id || match.players.includes(user.id)
+          ? match
+          : { ...match, players: [...match.players, user.id] }
+      )
     );
+
+    try {
+      if (!supabase) return;
+      const { error } = await supabase.from("match_players").upsert(
+        { match_id: id, user_id: user.id },
+        { onConflict: "match_id,user_id", ignoreDuplicates: true }
+      );
+      if (error) throw error;
+      setSyncError("");
+    } catch {
+      setSyncError("sync unavailable");
+    }
   };
 
   const upcoming = matches
@@ -735,6 +840,11 @@ function Dashboard({ user, onLogout }) {
             </button>
           </div>
         </header>
+        {syncError ? (
+          <div className="muted mono" style={{ margin: "0 0 12px 4px", color: "#d88c8c" }}>
+            {syncError} (showing local data)
+          </div>
+        ) : null}
 
         <section className="panel card">
           <div className="row">
