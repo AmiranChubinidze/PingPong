@@ -670,8 +670,9 @@ function NameTag({ user, isCreator }) {
   );
 }
 
-function ScheduledMatchCard({ match, currentUser, onJoin }) {
+function ScheduledMatchCard({ match, currentUser, onJoin, onLeave, onDelete }) {
   const joined = match.players.includes(currentUser.id);
+  const isCreator = match.createdBy === currentUser.id;
   const date = new Date(match.datetime);
   const dateStr = date.toLocaleDateString("en-US", {
     weekday: "short",
@@ -691,13 +692,31 @@ function ScheduledMatchCard({ match, currentUser, onJoin }) {
           <p className="match-time">{timeStr}</p>
           {match.location ? <p className="muted mono">{match.location}</p> : null}
         </div>
-        {!joined ? (
-          <button className="btn btn-soft mono" onClick={() => onJoin(match.id)} type="button">
-            join
-          </button>
-        ) : (
-          <span className="muted mono">joined</span>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          {!joined ? (
+            <button className="btn btn-soft mono" onClick={() => onJoin(match.id)} type="button">
+              join
+            </button>
+          ) : (
+            <>
+              <span className="muted mono">joined</span>
+              {isCreator ? (
+                <button
+                  className="btn btn-ghost mono"
+                  onClick={() => onDelete(match.id)}
+                  type="button"
+                  style={{ color: "#ffb4b4", borderColor: "rgba(240,120,120,0.4)" }}
+                >
+                  delete
+                </button>
+              ) : (
+                <button className="btn btn-ghost mono" onClick={() => onLeave(match.id)} type="button">
+                  leave
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </div>
       <div className="chips">
         {match.players.map((playerId) => {
@@ -751,9 +770,13 @@ function Dashboard({ user, onLogout }) {
 
   const createMatch = async () => {
     if (!newDate || !newTime) return;
+    const localDateTime = new Date(`${newDate}T${newTime}`);
+    const normalizedDateTime = Number.isNaN(localDateTime.getTime())
+      ? `${newDate}T${newTime}`
+      : localDateTime.toISOString();
     const match = {
       id: Date.now().toString(),
-      datetime: `${newDate}T${newTime}`,
+      datetime: normalizedDateTime,
       location: newLocation || null,
       createdBy: user.id,
       players: [user.id],
@@ -763,7 +786,7 @@ function Dashboard({ user, onLogout }) {
         const { data: created, error: createError } = await supabase
           .from("matches")
           .insert({
-            datetime: match.datetime,
+            datetime: normalizedDateTime,
             location: match.location,
             created_by: user.id,
           })
@@ -810,6 +833,46 @@ function Dashboard({ user, onLogout }) {
         { match_id: id, user_id: user.id },
         { onConflict: "match_id,user_id", ignoreDuplicates: true }
       );
+      if (error) throw error;
+      setSyncError("");
+    } catch {
+      setSyncError("sync unavailable");
+    }
+  };
+
+  const leaveMatch = async (id) => {
+    setMatches((prev) =>
+      prev.map((match) => {
+        if (match.id !== id) return match;
+        if (match.createdBy === user.id) return match;
+        return { ...match, players: match.players.filter((playerId) => playerId !== user.id) };
+      })
+    );
+
+    try {
+      if (!supabase) return;
+      const { error } = await supabase
+        .from("match_players")
+        .delete()
+        .eq("match_id", id)
+        .eq("user_id", user.id);
+      if (error) throw error;
+      setSyncError("");
+    } catch {
+      setSyncError("sync unavailable");
+    }
+  };
+
+  const deleteMatch = async (id) => {
+    setMatches((prev) => prev.filter((match) => match.id !== id));
+
+    try {
+      if (!supabase) return;
+      const { error } = await supabase
+        .from("matches")
+        .delete()
+        .eq("id", id)
+        .eq("created_by", user.id);
       if (error) throw error;
       setSyncError("");
     } catch {
@@ -893,6 +956,8 @@ function Dashboard({ user, onLogout }) {
                   match={match}
                   currentUser={user}
                   onJoin={joinMatch}
+                  onLeave={leaveMatch}
+                  onDelete={deleteMatch}
                 />
               ))
             )}
