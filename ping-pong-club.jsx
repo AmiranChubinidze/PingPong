@@ -36,11 +36,40 @@ const USERS = [
 
 const STORAGE_KEY_MATCHES = "ppc_scheduled";
 const STORAGE_KEY_SESSION = "ppc_session";
+const STORAGE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
+
+function getStorage() {
+  try {
+    const key = "__ppc_test__";
+    window.localStorage.setItem(key, "1");
+    window.localStorage.removeItem(key);
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function getCookie(name) {
+  const target = `${encodeURIComponent(name)}=`;
+  const cookies = document.cookie ? document.cookie.split("; ") : [];
+  for (const cookie of cookies) {
+    if (cookie.startsWith(target)) {
+      return decodeURIComponent(cookie.slice(target.length));
+    }
+  }
+  return null;
+}
+
+function setCookie(name, value) {
+  document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; path=/; max-age=${STORAGE_COOKIE_MAX_AGE}; samesite=lax`;
+}
 
 function loadData(key, fallback) {
   try {
+    const storage = getStorage();
     const raw =
-      window.localStorage.getItem(key) ??
+      (storage ? storage.getItem(key) : null) ??
+      getCookie(key) ??
       (window.__ppcStore ? window.__ppcStore[key] : null);
     return raw ? JSON.parse(raw) : fallback;
   } catch {
@@ -51,7 +80,12 @@ function loadData(key, fallback) {
 function saveData(key, value) {
   const payload = JSON.stringify(value);
   try {
-    window.localStorage.setItem(key, payload);
+    const storage = getStorage();
+    if (storage) {
+      storage.setItem(key, payload);
+    } else {
+      setCookie(key, payload);
+    }
   } catch {}
   if (!window.__ppcStore) window.__ppcStore = {};
   window.__ppcStore[key] = payload;
